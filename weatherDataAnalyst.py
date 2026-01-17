@@ -1,6 +1,7 @@
 import requests
 import json
 from pathlib import Path
+import matplotlib.pyplot as plt
 
 # api docs: https://open-meteo.com/en/docs
 
@@ -81,6 +82,129 @@ def pretty_print_json(data: dict, max_chars: int = 3000) -> None:
         print(text)
 
 # DATA CLEANING
+def calculate_comfort_index(temperature: float, humidity: float, wind_speed: float, 
+                            precipitation: float, cloud_cover: float) -> float:
+    """
+    Oblicza indeks komfortu pogodowego (0-100).
+    
+    Parametry:
+    - temperatura: ideał 18-24°C
+    - wilgotność: ideał 40-60%
+    - wiatr: lekki (< 10 km/h) = ok
+    - opady: bez opadów = lepiej
+    - zachmurzenie: poniżej 30% = ok
+    """
+    score = 0
+    
+    # Temperatura: 18-24°C = 25 pkt
+    if 18 <= temperature <= 24:
+        temp_score = 25
+    elif 15 <= temperature < 18 or 24 < temperature <= 27:
+        temp_score = 15  # trochę chłodne/ciepłe
+    elif 10 <= temperature < 15 or 27 < temperature <= 30:
+        temp_score = 5   # zimne/gorące
+    else:
+        temp_score = 0   # bardzo zimno/gorąco
+    
+    # Wilgotność: 40-60% = 25 pkt
+    if 40 <= humidity <= 60:
+        humidity_score = 25
+    elif 30 <= humidity < 40 or 60 < humidity <= 70:
+        humidity_score = 15  # trochę za niska/wysoka
+    elif 20 <= humidity < 30 or 70 < humidity <= 80:
+        humidity_score = 5   # bardzo za niska/wysoka
+    else:
+        humidity_score = 0   # ekstremalna
+    
+    # Wiatr: do 10 km/h = 20 pkt
+    if wind_speed <= 10:
+        wind_score = 20
+    elif wind_speed <= 15:
+        wind_score = 10  # umiarkowany
+    else:
+        wind_score = 0   # silny wiatr
+    
+    # Opady: brak = 15 pkt
+    if precipitation == 0 or precipitation is None:
+        precip_score = 15
+    elif precipitation < 1:
+        precip_score = 8   # lekkie opady
+    else:
+        precip_score = 0   # silne opady
+    
+    # Zachmurzenie: do 30% = 15 pkt
+    if cloud_cover <= 30:
+        cloud_score = 15
+    elif cloud_cover <= 60:
+        cloud_score = 8    # częściowo pochmurno
+    else:
+        cloud_score = 0    # bardzo pochmurne
+    
+    score = temp_score + humidity_score + wind_score + precip_score + cloud_score
+    return score
+
+def calculate_city_comfort_index(cleaned_rows: list[dict]) -> float:
+    """
+    Oblicza średni indeks komfortu dla miasta (średnia z wszystkich godzin).
+    """
+    if not cleaned_rows:
+        return 0
+    
+    scores = []
+    for row in cleaned_rows:
+        score = calculate_comfort_index(
+            temperature=row["temperature_2m"],
+            humidity=row["relative_humidity_2m"],
+            wind_speed=row["wind_speed_10m"] or 0,
+            precipitation=row["precipitation"] or 0,
+            cloud_cover=row["cloud_cover"] or 0
+        )
+        scores.append(score)
+    
+    return sum(scores) / len(scores)
+
+def plot_comfort_ranking(comfort_scores: dict) -> None:
+    """
+    Rysuje ranking miast ze względu na komfort pogodowy.
+    
+    comfort_scores: słownik {nazwa_miasta: indeks_komfortu}
+    """
+    # Sortowanie miast malejąco
+    cities = list(comfort_scores.keys())
+    scores = list(comfort_scores.values())
+    
+    sorted_data = sorted(zip(cities, scores), key=lambda x: x[1], reverse=True)
+    cities_sorted = [x[0] for x in sorted_data]
+    scores_sorted = [x[1] for x in sorted_data]
+    
+    # Utworzenie wykresu
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    bars = ax.barh(cities_sorted, scores_sorted, color='skyblue', edgecolor='navy')
+    
+    # Kolorowanie paski w zależności od wyniku
+    for i, (bar, score) in enumerate(zip(bars, scores_sorted)):
+        if score > 50:
+            bar.set_color('green')
+        elif score >= 38:
+            bar.set_color('yellow')
+        else:
+            bar.set_color('red')
+    
+    ax.set_xlabel('Indeks Komfortu Pogodowego (0-100)', fontsize=12)
+    ax.set_ylabel('Miasto', fontsize=12)
+    ax.set_title('Ranking Miast - Komfort Pogodowy', fontsize=14, fontweight='bold')
+    ax.set_xlim(0, 100)
+    
+    # Dodanie wartości na słupkach
+    for i, (city, score) in enumerate(zip(cities_sorted, scores_sorted)):
+        ax.text(score + 1, i, f'{score:.1f}', va='center', fontsize=10)
+    
+    plt.tight_layout()
+    plt.savefig('weather_data/comfort_ranking.png', dpi=150, bbox_inches='tight')
+    print("✓ Zapisano wykres rankingu do: weather_data/comfort_ranking.png")
+    plt.close()
+
 def clean_hourly_data(data: dict) -> list[dict]:
     """
     Oczyszczanie danych godzinowych:
@@ -204,6 +328,32 @@ def main():
     save_json({"capitals_weather_cleaned": cleaned_data}, str(cleaned_file))
 
     print(f"Zapisano oczyszczone dane do pliku: {cleaned_file.resolve()}")
+    
+    # OBLICZENIE INDEKSU KOMFORTU DLA KAŻDEGO MIASTA
+    print("\n" + "="*60)
+    print("RANKING KOMFORTU POGODOWEGO")
+    print("="*60)
+    
+    comfort_scores = {}
+    
+    for city_record in cleaned_data:
+        meta = city_record.get("metadata", {})
+        city_name = meta.get("city", "Unknown")
+        cleaned_rows = city_record.get("cleaned_hourly_rows", [])
+        
+        comfort_index = calculate_city_comfort_index(cleaned_rows)
+        comfort_scores[city_name] = comfort_index
+        
+        print(f"{city_name:15} -> Indeks komfortu: {comfort_index:6.2f}/100")
+    
+    # Sortowanie i wyświetlenie Top 5
+    top_5 = sorted(comfort_scores.items(), key=lambda x: x[1], reverse=True)[:5]
+    print("\n🏆 TOP 5 najwygodniejszych miast:")
+    for rank, (city, score) in enumerate(top_5, 1):
+        print(f"  {rank}. {city:15} ({score:.2f}/100)")
+    
+    # Rysowanie wykresu
+    plot_comfort_ranking(comfort_scores)
 
 if __name__ == "__main__":
     main()
