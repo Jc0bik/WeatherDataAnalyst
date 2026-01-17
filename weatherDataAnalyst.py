@@ -1,359 +1,309 @@
-import requests
 import json
-from pathlib import Path
-import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
 
-# api docs: https://open-meteo.com/en/docs
+"""
+Przypisanie wartości danym pogodowym
 
-CAPITALS = [
-    {"country": "Polska", "city": "Warsaw", "lat": 52.2297, "lon": 21.0122, "tz": "Europe/Warsaw"},
-    {"country": "Portugal", "city": "Lisbon", "lat": 38.7223, "lon": -9.1393, "tz": "Europe/Lisbon"},
-    {"country": "Spain", "city": "Madrid", "lat": 40.4168, "lon": -3.7038, "tz": "Europe/Madrid"},
-    {"country": "France", "city": "Paris", "lat": 48.8566, "lon": 2.3522, "tz": "Europe/Paris"},
-    {"country": "Italy", "city": "Rome", "lat": 41.9028, "lon": 12.4964, "tz": "Europe/Rome"},
-    {"country": "Germany", "city": "Berlin", "lat": 52.5200, "lon": 13.4050, "tz": "Europe/Berlin"},
-    {"country": "UK", "city": "London", "lat": 51.5074, "lon": -0.1278, "tz": "Europe/London"},
-    {"country": "Ireland", "city": "Dublin", "lat": 53.3498, "lon": -6.2603, "tz": "Europe/Dublin"},
-    {"country": "Norway", "city": "Oslo", "lat": 59.9139, "lon": 10.7522, "tz": "Europe/Oslo"},
-    {"country": "Sweden", "city": "Stockholm", "lat": 59.3293, "lon": 18.0686, "tz": "Europe/Stockholm"},
-    {"country": "Finland", "city": "Helsinki", "lat": 60.1699, "lon": 24.9384, "tz": "Europe/Helsinki"},
-    {"country": "Greece", "city": "Athens", "lat": 37.9838, "lon": 23.7275, "tz": "Europe/Athens"},
-    {"country": "Japan", "city": "Tokyo", "lat": 35.6762, "lon": 139.6503, "tz": "Asia/Tokyo"},
-    {"country": "USA", "city": "Washington", "lat": 38.9072, "lon": -77.0369, "tz": "America/New_York"},
-    {"country": "Australia", "city": "Canberra", "lat": -35.2809, "lon": 149.1300, "tz": "Australia/Sydney"},
-]
+Metodologia: ranking temperatury jest zależny od pory roku na danej półkuli 
+- w zimę optimum temperatury wynosi 10 stopni, a tolerancja 8, w lato - 22 i 10,
+w inne pory roku 15 i 10. Jeśli wartość temperatury różni się od optimum o więcej 
+niż wynosi tolerancja, to wynik wynosi 0, w innych przypadkach dostaje punkty od 0 do 1.
 
-def fetch_weather_open_meteo(
-    latitude: float,                    # szerokość geograficzna
-    longitude: float,                   # długość geograficzna
-    timezone: str = "Europe/Warsaw",
-    days: int = 3                       # jako default 3 ostatnie dni, max to 16 dni
-) -> dict:
-    """
-    pobiera dane pogodowe (zwracane co godzine z każdego dnia) z Open-Meteo API
-    zwraca JSON jako słownik (dict) w Pythonie
-    """
-    url = "https://api.open-meteo.com/v1/forecast"
+Pozostałe czynniki są niezależne od pór roku:
+- dla wilgotności optimum to 50, a tolerancja wynosi 30,
+- dla prędkości wiatru optimum to 0, a tolerancja wynosi 70,
+- dla opadów optimum to 0, a tolerancja wynosi 5,
+- dla zachmurzenia optimum to 0, a tolerancja wynosi 90
+"""
 
-    params = {
-        "latitude": latitude,
-        "longitude": longitude,
-        "hourly": [
-            "temperature_2m",
-            "relative_humidity_2m",
-            "precipitation",
-            "wind_speed_10m",
-            "cloud_cover",
-        ],
-        "forecast_days": days,
-        "timezone": timezone,
-    }
 
-    response = requests.get(url, params=params, timeout=60)
-    response.raise_for_status()
-    return response.json()
+def temperature_score_seasonal(t, month, lat):
+    north = lat >= 0
 
-def save_json(data: dict, filepath: str) -> None:
-    """
-    uwtorzenie pliku z json'em
-    """
-    path = Path(filepath)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-def load_json_from_file(filepath: str) -> dict:
-    """
-    wczytanie danych z pliku (typ danych w pliku json) i zwraca dict.
-    """
-    path = Path(filepath)
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
-
-def pretty_print_json(data: dict, max_chars: int = 3000) -> None:
-    """
-    wyswietlenie JSON w konsoli (razem z formatowaniem)
-    max_chars - ograniczenie dlugosci outputu (aby nie wyswietlic calego dlugiego pliku w konsoli)
-    """
-    text = json.dumps(data, ensure_ascii=False, indent=2)
-    if len(text) > max_chars:
-        print(text[:max_chars] + "\n... (ucięte)")
+    if north:
+        winter = [12, 1, 2]
+        summer = [6, 7, 8]
     else:
-        print(text)
+        winter = [6, 7, 8]
+        summer = [12, 1, 2]
 
-# DATA CLEANING
-def calculate_comfort_index(temperature: float, humidity: float, wind_speed: float, 
-                            precipitation: float, cloud_cover: float) -> float:
-    """
-    Oblicza indeks komfortu pogodowego (0-100).
-    
-    Parametry:
-    - temperatura: ideał 18-24°C
-    - wilgotność: ideał 40-60%
-    - wiatr: lekki (< 10 km/h) = ok
-    - opady: bez opadów = lepiej
-    - zachmurzenie: poniżej 30% = ok
-    """
-    score = 0
-    
-    # Temperatura: 18-24°C = 25 pkt
-    if 18 <= temperature <= 24:
-        temp_score = 25
-    elif 15 <= temperature < 18 or 24 < temperature <= 27:
-        temp_score = 15  # trochę chłodne/ciepłe
-    elif 10 <= temperature < 15 or 27 < temperature <= 30:
-        temp_score = 5   # zimne/gorące
+    if month in winter:
+        optimum = 10
+        tolerance = 8
+    elif month in summer:
+        optimum = 22
+        tolerance = 10
     else:
-        temp_score = 0   # bardzo zimno/gorąco
-    
-    # Wilgotność: 40-60% = 25 pkt
-    if 40 <= humidity <= 60:
-        humidity_score = 25
-    elif 30 <= humidity < 40 or 60 < humidity <= 70:
-        humidity_score = 15  # trochę za niska/wysoka
-    elif 20 <= humidity < 30 or 70 < humidity <= 80:
-        humidity_score = 5   # bardzo za niska/wysoka
-    else:
-        humidity_score = 0   # ekstremalna
-    
-    # Wiatr: do 10 km/h = 20 pkt
-    if wind_speed <= 10:
-        wind_score = 20
-    elif wind_speed <= 15:
-        wind_score = 10  # umiarkowany
-    else:
-        wind_score = 0   # silny wiatr
-    
-    # Opady: brak = 15 pkt
-    if precipitation == 0 or precipitation is None:
-        precip_score = 15
-    elif precipitation < 1:
-        precip_score = 8   # lekkie opady
-    else:
-        precip_score = 0   # silne opady
-    
-    # Zachmurzenie: do 30% = 15 pkt
-    if cloud_cover <= 30:
-        cloud_score = 15
-    elif cloud_cover <= 60:
-        cloud_score = 8    # częściowo pochmurno
-    else:
-        cloud_score = 0    # bardzo pochmurne
-    
-    score = temp_score + humidity_score + wind_score + precip_score + cloud_score
-    return score
+        optimum = 15
+        tolerance = 10
 
-def calculate_city_comfort_index(cleaned_rows: list[dict]) -> float:
-    """
-    Oblicza średni indeks komfortu dla miasta (średnia z wszystkich godzin).
-    """
-    if not cleaned_rows:
-        return 0
-    
-    scores = []
-    for row in cleaned_rows:
-        score = calculate_comfort_index(
-            temperature=row["temperature_2m"],
-            humidity=row["relative_humidity_2m"],
-            wind_speed=row["wind_speed_10m"] or 0,
-            precipitation=row["precipitation"] or 0,
-            cloud_cover=row["cloud_cover"] or 0
-        )
-        scores.append(score)
-    
-    return sum(scores) / len(scores)
+    score = 1 - abs(t - optimum) / tolerance
+    return np.clip(score, 0, 1)
 
-def plot_comfort_ranking(comfort_scores: dict) -> None:
-    """
-    Rysuje ranking miast ze względu na komfort pogodowy.
-    
-    comfort_scores: słownik {nazwa_miasta: indeks_komfortu}
-    """
-    # Sortowanie miast malejąco
-    cities = list(comfort_scores.keys())
-    scores = list(comfort_scores.values())
-    
-    sorted_data = sorted(zip(cities, scores), key=lambda x: x[1], reverse=True)
-    cities_sorted = [x[0] for x in sorted_data]
-    scores_sorted = [x[1] for x in sorted_data]
-    
-    # Utworzenie wykresu
-    fig, ax = plt.subplots(figsize=(12, 8))
-    
-    bars = ax.barh(cities_sorted, scores_sorted, color='skyblue', edgecolor='navy')
-    
-    # Kolorowanie paski w zależności od wyniku
-    for i, (bar, score) in enumerate(zip(bars, scores_sorted)):
-        if score > 50:
-            bar.set_color('green')
-        elif score >= 38:
-            bar.set_color('yellow')
-        else:
-            bar.set_color('red')
-    
-    ax.set_xlabel('Indeks Komfortu Pogodowego (0-100)', fontsize=12)
-    ax.set_ylabel('Miasto', fontsize=12)
-    ax.set_title('Ranking Miast - Komfort Pogodowy', fontsize=14, fontweight='bold')
-    ax.set_xlim(0, 100)
-    
-    # Dodanie wartości na słupkach
-    for i, (city, score) in enumerate(zip(cities_sorted, scores_sorted)):
-        ax.text(score + 1, i, f'{score:.1f}', va='center', fontsize=10)
-    
-    plt.tight_layout()
-    plt.savefig('weather_data/comfort_ranking.png', dpi=150, bbox_inches='tight')
-    print("✓ Zapisano wykres rankingu do: weather_data/comfort_ranking.png")
-    plt.close()
 
-def clean_hourly_data(data: dict) -> list[dict]:
-    """
-    Oczyszczanie danych godzinowych:
-    - spłaszczenie hourly JSON do listy wierszy
-    - usunięcie rekordyów, gdzie brakuje temperatury lub wilgotności (None)
-    """
-    hourly = data.get("hourly", {})
+def humidity_score(h):
+    return np.clip(1 - abs(h - 50) / 30, 0, 1)
 
-    times = hourly.get("time", [])
-    temps = hourly.get("temperature_2m", [])
-    hums = hourly.get("relative_humidity_2m", [])
-    precip = hourly.get("precipitation", [])
-    wind = hourly.get("wind_speed_10m", [])
-    cloud = hourly.get("cloud_cover", [])
+
+def wind_score(w):
+    return np.clip(1 - w / 70, 0, 1)
+
+
+def precipitation_score(p):
+    return 1 if p == 0 else np.clip(1 - p / 5, 0, 1)
+
+
+def cloud_score(c):
+    return np.clip(1 - c / 90, 0, 1)
+
+
+def calculate_all_rankings(data_json_path):
+    """
+    Wczytaj dane z JSON i oblicz wszystkie rankingi
+    
+    Zwraca słownik z następującymi kluczami:
+    - ranking: główny ranking miast
+    - city_stats: statystyki pogodowe po miastach
+    - daily_ranking: ranking na każdy dzień
+    - top3_per_day: top 3 miasta na każdy dzień
+    - best_city_per_day: najlepsze miasto na każdy dzień
+    """
+    # Wczytanie danych
+    with open(data_json_path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
 
     rows = []
+    for city_block in raw["capitals_weather_cleaned"]:
+        city = city_block["metadata"]["city"]
+        country = city_block["metadata"]["country"]
 
-    min_len = min(
-        len(times),
-        len(temps),
-        len(hums),
-        len(precip),
-        len(wind),
-        len(cloud)
+        for i in city_block["cleaned_hourly_rows"]:
+            rows.append({
+                "city": city,
+                "country": country,
+                "latitude": city_block["metadata"]["lat"],
+                "time": i["time"],
+                "temperature": i["temperature_2m"],
+                "humidity": i["relative_humidity_2m"],
+                "precipitation": i["precipitation"],
+                "wind": i["wind_speed_10m"],
+                "clouds": i["cloud_cover"],
+            })
+
+    # main_table
+    main_table = pd.DataFrame(rows)
+    main_table["time"] = pd.to_datetime(main_table["time"])
+    main_table["date"] = main_table["time"].dt.date
+
+    # Statystyki po miastach
+    city_stats = (
+        main_table.groupby(["country", "city"])
+        .agg(
+            avg_temperature=("temperature", "mean"),
+            max_temperature=("temperature", "max"),
+            min_temperature=("temperature", "min"),
+            avg_humidity=("humidity", "mean"),
+            max_humidity=("humidity", "max"),
+            min_humidity=("humidity", "min"),
+            avg_wind=("wind", "mean"),
+            max_wind=("wind", "max"),
+            avg_precipitation=("precipitation", "mean"),
+            total_precipitation=("precipitation", "sum"),
+            avg_clouds=("clouds", "mean"),
+        )
+        .reset_index()
+    )
+    city_stats = city_stats.round(2)
+
+    # main_table_day - tylko godziny dzienne (7-22)
+    main_table_day = main_table[
+        (main_table["time"].dt.hour >= 7) &
+        (main_table["time"].dt.hour <= 22)
+    ].copy()
+
+    # Obliczenie score'ów
+    main_table_day["temperature_score"] = main_table_day.apply(
+        lambda r: temperature_score_seasonal(
+            r["temperature"],
+            r["time"].month,
+            r["latitude"]
+        ),
+        axis=1
     )
 
-    for i in range(min_len):
-        t = times[i]
-        temp = temps[i]
-        hum = hums[i]
-        pr = precip[i]
-        ws = wind[i]
-        cc = cloud[i]
+    # Indeks komfortu
+    main_table_day["comfort_index"] = (
+        0.35 * main_table_day["temperature_score"] +
+        0.20 * main_table_day["humidity"].apply(humidity_score) +
+        0.20 * main_table_day["precipitation"].apply(precipitation_score) +
+        0.15 * main_table_day["wind"].apply(wind_score) +
+        0.10 * main_table_day["clouds"].apply(cloud_score)
+    )
 
-        # cleaning: pominięcie rekordów z brakami kluczowych danych
-        if temp is None or hum is None:
-            continue
+    # Główny ranking
+    ranking = (
+        main_table_day.groupby("city")["comfort_index"]
+        .mean()
+        .sort_values(ascending=False)
+        .reset_index()
+    )
+    ranking["Pozycja"] = range(1, len(ranking) + 1)
+    ranking = ranking.rename(columns={"city": "Miasto", "comfort_index": "Indeks komfortu"})
+    ranking = ranking[["Pozycja", "Miasto", "Indeks komfortu"]]
+    ranking["Indeks komfortu"] = ranking["Indeks komfortu"].round(3)
 
-        rows.append({
-            "time": t,
-            "temperature_2m": float(temp),
-            "relative_humidity_2m": float(hum),
-            "precipitation": None if pr is None else float(pr),
-            "wind_speed_10m": None if ws is None else float(ws),
-            "cloud_cover": None if cc is None else float(cc),
-        })
+    # Daily ranking
+    daily_ranking = (
+        main_table_day.groupby(["date", "city"])["comfort_index"]
+        .mean()
+        .reset_index()
+        .sort_values(["date", "comfort_index"], ascending=[True, False])
+    )
+    daily_ranking.columns = ["Data", "Miasto", "Indeks komfortu"]
+    daily_ranking["Indeks komfortu"] = daily_ranking["Indeks komfortu"].round(3)
+    daily_ranking["Data"] = daily_ranking["Data"].astype(str)
 
-    return rows
+    # Top 3 na dzień
+    top3_per_day = (
+        daily_ranking
+        .groupby("Data")
+        .head(3)
+        .reset_index(drop=True)
+    )
+
+    # Najlepsze miasto na dzień
+    best_city_per_day = (
+        daily_ranking
+        .groupby("Data")
+        .first()
+        .reset_index()
+    )
+
+    return {
+        "ranking": ranking,
+        "city_stats": city_stats,
+        "daily_ranking": daily_ranking,
+        "top3_per_day": top3_per_day,
+        "best_city_per_day": best_city_per_day,
+    }
+
 
 def main():
-    days = 16
-    output_folder = Path("weather_data")
+    # Wczytanie danych
+    with open("weather_data/open_meteo_all_capitals_CLEANED.json", "r", encoding="utf-8") as f:
+        raw = json.load(f)
 
-    all_data = []
+    rows = []
+    for city_block in raw["capitals_weather_cleaned"]:
+        city = city_block["metadata"]["city"]
+        country = city_block["metadata"]["country"]
 
-    for capital in CAPITALS:
-        country = capital["country"]
-        city = capital["city"]
-        lat = capital["lat"]
-        lon = capital["lon"]
-        tz = capital["tz"]
+        for i in city_block["cleaned_hourly_rows"]:
+            rows.append({
+                "city": city,
+                "country": country,
+                "latitude": city_block["metadata"]["lat"],
+                "time": i["time"],
+                "temperature": i["temperature_2m"],
+                "humidity": i["relative_humidity_2m"],
+                "precipitation": i["precipitation"],
+                "wind": i["wind_speed_10m"],
+                "clouds": i["cloud_cover"],
+                "comfort_index": None,
+            })
 
-        print(f"Pobieram: {city} ({country})...")
+    # main_table - tabela zawierająca dane pogodowe z podziałem na miasta i godziny
+    main_table = pd.DataFrame(rows)
+    main_table["time"] = pd.to_datetime(main_table["time"])
+    main_table["date"] = main_table["time"].dt.date
 
-        weather_json = fetch_weather_open_meteo(
-            latitude=lat,
-            longitude=lon,
-            timezone=tz,
-            days=days
+    # tabela zawierające średnie, maksymalne, minimalne lub sumaryczne wartości
+    # spośród 16 prognozowanych dni z podziałem na miasta
+    city_stats = (
+        main_table.groupby(["country", "city"])
+        .agg(
+            avg_temperature=("temperature", "mean"),
+            max_temperature=("temperature", "max"),
+            min_temperature=("temperature", "min"),
+
+            avg_humidity=("humidity", "mean"),
+            max_humidity=("humidity", "max"),
+            min_humidity=("humidity", "min"),
+
+            avg_wind=("wind", "mean"),
+            max_wind=("wind", "max"),
+
+            avg_precipitation=("precipitation", "mean"),
+            total_precipitation=("precipitation", "sum"),
+
+            avg_clouds=("clouds", "mean"),
         )
+        .reset_index()
+    )
+    city_stats = city_stats.round(2)
 
-        # dodanie metadata (aby łatwiej połączyć ze sobą dane)
-        weather_json["metadata"] = {
-            "country": country,
-            "city": city,
-            "lat": lat,
-            "lon": lon,
-            "timezone": tz
-        }
+    # main_table_day - kopia main_table uwzględniają tylko warunki w dzień (między 7 a 22)
+    # dalsze rankingi opierają się na tej tabeli
+    main_table_day = main_table[
+        (main_table["time"].dt.hour >= 7) &
+        (main_table["time"].dt.hour <= 22)
+        ].copy()
 
-        # zapisnie osobnego pliku dla każdego miasta
-        safe_city = city.lower().replace(" ", "_")
-        file_path = output_folder / f"open_meteo_{safe_city}.json"
-        save_json(weather_json, str(file_path))
+    # Obliczenie rankingu temperatury
+    main_table_day["temperature_score"] = main_table_day.apply(
+        lambda r: temperature_score_seasonal(
+            r["temperature"],
+            r["time"].month,
+            r["latitude"]
+        ),
+        axis=1
+    )
 
-        all_data.append(weather_json)
+    # Indeks komfortu (wagi)
+    main_table_day["comfort_index"] = (
+            0.35 * main_table_day["temperature_score"] +
+            0.20 * main_table_day["humidity"].apply(humidity_score) +
+            0.20 * main_table_day["precipitation"].apply(precipitation_score) +
+            0.15 * main_table_day["wind"].apply(wind_score) +
+            0.10 * main_table_day["clouds"].apply(cloud_score)
+    )
 
-    # zapis zbiorczy (wszystkie stolice w jednym JSON)
-    all_capitals_file = output_folder / "open_meteo_all_capitals.json"
-    save_json({"capitals_weather": all_data}, str(all_capitals_file))
+    # Agregacja do miast
+    # ranking - tabela z podziałem na miasta i średnią wartością comfort_index
+    ranking = (
+        main_table_day.groupby("city")["comfort_index"]
+        .mean()
+        .sort_values(ascending=False)
+        .reset_index()
+    )
 
-    print("\nGotowe!")
-    print(f"Pliki zapisane w folderze: {output_folder.resolve()}")
+    # daily_ranking - tabela z podziałem na miasta, dni i średnią wartością comfort_index
+    daily_ranking = (
+        main_table_day.groupby(["date", "city"])["comfort_index"]
+        .mean()
+        .reset_index()
+        .sort_values(["date", "comfort_index"], ascending=[True, False])
+    )
 
-    # odczyt danych z pliku
-    print("\nWczytuję plik zbiorczy...")
+    # top3_per_day - po 3 najlepsze miasta dla każdego dnia (uwaga - ostatni dzień z zakresu
+    # może być niemiarodajny ze względu na różne strefy czasowe)
+    top3_per_day = (
+        daily_ranking
+        .groupby("date")
+        .head(3)
+    )
 
-    loaded_all = load_json_from_file(str(all_capitals_file))
+    # best_city_per_day - miasta z najwyższą punktacją w danym dniu
+    best_city_per_day = (
+        daily_ranking
+        .groupby("date")
+        .first()
+        .reset_index()
+    )
 
-    # Podstawowe info
-    capitals_list = loaded_all.get("capitals_weather", [])
-    print(f"Liczba znalezionych miast w pliku zbiorczym: {len(capitals_list)}")
+    print()
 
-    # Podgląd fragmentu JSON
-    # print("\nPodgląd JSON (fragment z pliku zbiorczego):")
-    # pretty_print_json(loaded_all, max_chars=3000)
-
-    # CLEANING DLA WSZYSTKICH MIAST + ZAPIS DO ODDZIELNEGO PLIKU
-    cleaned_data = []
-
-    for city_data in capitals_list:
-        meta = city_data.get("metadata", {})
-        cleaned_rows = clean_hourly_data(city_data)
-
-        cleaned_data.append({
-            "metadata": meta,
-            "cleaned_hourly_rows": cleaned_rows
-        })
-
-    cleaned_file = output_folder / "open_meteo_all_capitals_CLEANED.json"
-    save_json({"capitals_weather_cleaned": cleaned_data}, str(cleaned_file))
-
-    print(f"Zapisano oczyszczone dane do pliku: {cleaned_file.resolve()}")
-    
-    # OBLICZENIE INDEKSU KOMFORTU DLA KAŻDEGO MIASTA
-    print("\n" + "="*60)
-    print("RANKING KOMFORTU POGODOWEGO")
-    print("="*60)
-    
-    comfort_scores = {}
-    
-    for city_record in cleaned_data:
-        meta = city_record.get("metadata", {})
-        city_name = meta.get("city", "Unknown")
-        cleaned_rows = city_record.get("cleaned_hourly_rows", [])
-        
-        comfort_index = calculate_city_comfort_index(cleaned_rows)
-        comfort_scores[city_name] = comfort_index
-        
-        print(f"{city_name:15} -> Indeks komfortu: {comfort_index:6.2f}/100")
-    
-    # Sortowanie i wyświetlenie Top 5
-    top_5 = sorted(comfort_scores.items(), key=lambda x: x[1], reverse=True)[:5]
-    print("\n🏆 TOP 5 najwygodniejszych miast:")
-    for rank, (city, score) in enumerate(top_5, 1):
-        print(f"  {rank}. {city:15} ({score:.2f}/100)")
-    
-    # Rysowanie wykresu
-    plot_comfort_ranking(comfort_scores)
 
 if __name__ == "__main__":
     main()
